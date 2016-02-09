@@ -1,30 +1,21 @@
 package org.codehaus.mojo.clirr;
 
-/*
- * Copyright 2006 The Apache Software Foundation.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Set;
 
-import net.sf.clirr.core.Checker;
-import net.sf.clirr.core.CheckerException;
-import net.sf.clirr.core.ClassFilter;
-import net.sf.clirr.core.DiffListener;
-import net.sf.clirr.core.PlainDiffListener;
-import net.sf.clirr.core.Severity;
-import net.sf.clirr.core.internal.bcel.BcelJavaType;
-import net.sf.clirr.core.internal.bcel.BcelTypeArrayBuilder;
-import net.sf.clirr.core.spi.JavaType;
 import org.apache.bcel.classfile.ClassParser;
 import org.apache.bcel.classfile.JavaClass;
 import org.apache.bcel.util.ClassLoaderRepository;
@@ -55,21 +46,31 @@ import org.codehaus.plexus.util.ReaderFactory;
 import org.codehaus.plexus.util.xml.XmlStreamReader;
 import org.codehaus.plexus.util.xml.pull.XmlPullParserException;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.net.MalformedURLException;
-import java.net.URL;
-import java.net.URLClassLoader;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Set;
+/*
+ * Copyright 2006 The Apache Software Foundation.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import net.sf.clirr.core.Checker;
+import net.sf.clirr.core.CheckerException;
+import net.sf.clirr.core.ClassFilter;
+import net.sf.clirr.core.DiffListener;
+import net.sf.clirr.core.PlainDiffListener;
+import net.sf.clirr.core.Severity;
+import net.sf.clirr.core.internal.bcel.BcelJavaType;
+import net.sf.clirr.core.internal.bcel.BcelTypeArrayBuilder;
+import net.sf.clirr.core.spi.JavaType;
 
 /**
  * Base parameters for Clirr check and report.
@@ -469,36 +470,60 @@ public abstract class AbstractClirrMojo
         }
         return dependencies;
     }
+    
+    private Artifact resolveArtifactFromVersionSpec(ArtifactSpecification artifactWithVersionSpec) throws MojoFailureException, MojoExecutionException {
+        final String groupId = artifactWithVersionSpec.getGroupId();
+        final String artifactId = artifactWithVersionSpec.getArtifactId();
+        final String versionSpec = artifactWithVersionSpec.getVersion();
+        final String artifactType = (artifactWithVersionSpec.getType()==null)?"jar":artifactWithVersionSpec.getType();
+        final String artifactClassifier = artifactWithVersionSpec.getClassifier();
+    
+        checkMandatory(groupId, "groupId", artifactWithVersionSpec);
+        checkMandatory(artifactId, "artifactId", artifactWithVersionSpec);
+        checkMandatory(versionSpec, "version", artifactWithVersionSpec);
+        checkMandatory(artifactType, "type", artifactWithVersionSpec);
+        
+        VersionRange range;
+        try {
+            range = VersionRange.createFromVersionSpec( versionSpec );
+        } catch ( InvalidVersionSpecificationException e ) {
+            getLog().info(String.format("%s cannot be used as a Version specification", versionSpec));
+            range = VersionRange.createFromVersion(versionSpec);
+        }
+        
+        Artifact resolvedArtifact;
+        try {
+            resolvedArtifact = factory.createDependencyArtifact( groupId, artifactId, range, artifactType, artifactClassifier, Artifact.SCOPE_COMPILE);
 
-    private Artifact resolveArtifact( ArtifactSpecification artifactSpec )
-        throws MojoFailureException, MojoExecutionException
-    {
-        final String groupId = artifactSpec.getGroupId();
-        if ( groupId == null )
-        {
-            throw new MojoFailureException( "An artifacts groupId is required." );
+            if (!resolvedArtifact.getVersionRange().isSelectedVersionKnown(resolvedArtifact)) {
+                getLog().debug("Searching for versions in range: " + resolvedArtifact.getVersionRange());
+                
+                List availableVersions = metadataSource.retrieveAvailableVersions(resolvedArtifact, localRepository, project.getRemoteArtifactRepositories());
+                filterSnapshots(availableVersions);
+
+                ArtifactVersion version = range.matchVersion(availableVersions);
+                if (version != null) {
+                    resolvedArtifact.selectVersion(version.toString());
+                }
+            }
         }
-        final String artifactId = artifactSpec.getArtifactId();
-        if ( artifactId == null )
-        {
-            throw new MojoFailureException( "An artifacts artifactId is required." );
-        }
-        final String version = artifactSpec.getVersion();
-        if ( version == null )
-        {
-            throw new MojoFailureException( "An artifacts version number is required." );
-        }
-        final VersionRange versionRange = VersionRange.createFromVersion( version );
-        String type = artifactSpec.getType();
-        if ( type == null )
-        {
-            type = "jar";
+        catch (OverConstrainedVersionException e1) {
+            throw new MojoFailureException("Invalid comparison version: " + e1.getMessage());
+        } catch (ArtifactMetadataRetrievalException e11) {
+            throw new MojoExecutionException("Error determining previous version: " + e11.getMessage(), e11);
         }
 
-        Artifact artifact =
-            factory.createDependencyArtifact( groupId, artifactId, versionRange, type, artifactSpec.getClassifier(),
-                                              Artifact.SCOPE_COMPILE );
-        return artifact;
+        if (resolvedArtifact.getVersion() == null) {
+            getLog().info( "Unable to find a good candidate version of " + artifactWithVersionSpec.toString() + " in the repository");
+        }
+
+        return resolvedArtifact;
+    }
+    
+    private void checkMandatory(String item, String itemName, ArtifactSpecification artifact) throws MojoFailureException {
+        if (item == null || item.trim().length() == 0) {
+            throw new MojoFailureException("A " + itemName + " is required in artifact: " + artifact.toString());
+        }
     }
 
     protected Set resolveArtifacts( ArtifactSpecification[] artifacts )
@@ -508,10 +533,13 @@ public abstract class AbstractClirrMojo
         Artifact[] result = new Artifact[artifacts.length];
         for ( int i = 0; i < result.length; i++ )
         {
-            artifactSet.add( resolveArtifact( artifacts[i] ) );
+            artifactSet.add( resolveArtifactFromVersionSpec( artifacts[i] ) );
+//            artifactSet.add( resolveArtifact( artifacts[i] ) );
         }
         return artifactSet;
     }
+    
+
 
     private Artifact getComparisonArtifact()
         throws MojoFailureException, MojoExecutionException
